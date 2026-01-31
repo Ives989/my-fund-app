@@ -1,0 +1,6 @@
+streamlit
+pandas
+efinance
+requests
+lxml
+plotly
