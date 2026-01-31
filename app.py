@@ -1,3 +1,16 @@
+mport os
+import shutil
+
+# 强制将缓存目录指向云服务器允许读写的临时文件夹
+os.environ['EF_CACHE_DIR'] = '/tmp/efinance_cache'
+
+# 如果该目录已存在且不可写，先清理（可选，增加稳定性）
+if os.path.exists('/tmp/efinance_cache'):
+    try: shutil.rmtree('/tmp/efinance_cache')
+    except: pass
+
+import streamlit as st
+# ... 后面保持原来的代码不变 ...
 import os
 os.environ['EF_CACHE_DIR'] = '/tmp/efinance_cache'
 
