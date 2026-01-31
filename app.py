@@ -1,4 +1,4 @@
-mport os
+import os
 import shutil
 
 # 强制将缓存目录指向云服务器允许读写的临时文件夹
