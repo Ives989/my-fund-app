@@ -1,21 +1,18 @@
 import os
+import sys
+import pathlib
 import shutil
 
-# 强制将缓存目录指向云服务器允许读写的临时文件夹
+# --- 核心修复：解决云端只读权限问题 ---
+# 1. 强制重定向缓存
 os.environ['EF_CACHE_DIR'] = '/tmp/efinance_cache'
 
-# 如果该目录已存在且不可写，先清理（可选，增加稳定性）
-if os.path.exists('/tmp/efinance_cache'):
-    try: shutil.rmtree('/tmp/efinance_cache')
-    except: pass
+# 2. 拦截并空转 mkdir 函数，防止第三方库尝试创建系统目录
+def mock_mkdir(*args, **kwargs):
+    pass
+pathlib.Path.mkdir = mock_mkdir
 
-import streamlit as st
-# ... 后面保持原来的代码不变 ...
-import os
-os.environ['EF_CACHE_DIR'] = '/tmp/efinance_cache'
-
-import streamlit as st
-# ... 后面保持原来的代码不变 ...
+# --- 导入正式库 ---
 import streamlit as st
 import pandas as pd
 import efinance as ef
@@ -26,111 +23,132 @@ import time
 import plotly.graph_objects as go
 from datetime import datetime
 
-# --- 1. 配置与样式优化 ---
-st.set_page_config(page_title="智投 Pro", layout="wide", initial_sidebar_state="collapsed")
+# --- 配置与样式 ---
+st.set_page_config(page_title="智投 Pro 手机版", layout="wide", initial_sidebar_state="collapsed")
 
-# 手机端视觉优化 CSS
 st.markdown("""
     <style>
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    .stMetric { background-color: #ffffff; border: 1px solid #eeeeee; padding: 15px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     .main .block-container { padding-top: 1rem; }
-    div[data-testid="stExpander"] { border: none; box-shadow: 0px 4px 6px rgba(0,0,0,0.1); }
+    div[data-testid="stExpander"] { border: none !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 持久化存储 ---
+# --- 数据存储 ---
 DB_FILE = "portfolio.json"
 
 def load_data():
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as f: return json.load(f)
-    except: return []
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f: return json.load(f)
+        except: return []
+    return []
 
 def save_data(data):
     with open(DB_FILE, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False)
 
-# --- 3. 数据抓取核心 ---
+# --- 数据抓取引擎 ---
 @st.cache_data(ttl=15)
 def fetch_official(code):
-    """官方估值接口"""
     try:
         url = f"http://fundgz.1234567.com.cn/js/{code}.js"
-        res = requests.get(url, timeout=3)
+        res = requests.get(url, timeout=5, headers={"Referer": "http://fund.eastmoney.com/"})
         data = json.loads(re.match(r"jsonpgz\((.*)\);", res.text).group(1))
-        return {"change": float(data['gszzl']), "val": float(data['gsz']), "last": float(data['dwjz']), "time": data['gztime'][-5:]}
+        return {
+            "name": data['name'],
+            "change": float(data['gszzl']),
+            "val": float(data['gsz']),
+            "last": float(data['dwjz']),
+            "time": data['gztime'][-5:]
+        }
     except: return None
 
 @st.cache_data(ttl=3600)
 def fetch_shadow(code):
-    """影子估值：解析重仓股"""
     try:
         url = f"http://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code={code}&topline=10"
         df = pd.read_html(url)[0]
         df['代码'] = df['股票代码'].astype(str).str.zfill(6)
         df['权重'] = df['持仓占比'].str.replace('%', '').astype(float)
-        quotes = ef.stock.get_quote(df['代码'].tolist())
+        
+        # 获取重仓股行情
+        stock_codes = df['代码'].tolist()
+        quotes = ef.stock.get_quote(stock_codes)
         merged = pd.merge(df, quotes[['股票代码', '涨跌幅']], left_on='代码', right_on='股票代码')
-        # 加权计算
+        
         top10_weight = merged['权重'].sum()
         top10_profit = (merged['权重'] * merged['涨跌幅']).sum() / 100
+        
+        # 剩余仓位参考沪深300
         hs300 = ef.stock.get_quote(['000300'])['涨跌幅'].values[0]
-        return round(top10_profit + (100 - top10_weight) * hs300 / 100, 2)
+        remain_profit = ((100 - top10_weight) * hs300) / 100
+        
+        return round(top10_profit + remain_profit, 2)
     except: return 0.0
 
-# --- 4. 手机端主界面 ---
+# --- 主界面 ---
 st.title("📈 智投看板 Pro")
 
-# 模式切换
-mode = st.tabs(["🚀 官方模式", "🛡️ 影子模式", "⚙️ 持仓管理"])
+tab_home, tab_manage = st.tabs(["📊 实时行情", "⚙️ 持仓管理"])
 
-with mode[2]: # 持仓管理
-    with st.expander("➕ 添加/修改基金"):
-        c1, c2 = st.columns(2)
-        nc = c1.text_input("代码", placeholder="6位")
-        nn = c2.text_input("简称")
-        ns = st.number_input("持有份额", min_value=0.0)
-        if st.button("保存持仓"):
-            curr = load_data()
-            curr.append({"code": nc, "name": nn, "shares": ns})
-            save_data(curr)
-            st.rerun()
-    if st.button("🗑️ 清空数据"):
-        save_data([]); st.rerun()
-
-portfolio = load_data()
-
-# 数据显示逻辑
-if not portfolio:
-    st.info("手机点击‘持仓管理’添加你的第一支基金")
-else:
-    results = []
-    with st.spinner('同步行情中...'):
-        for f in portfolio:
-            if "官方" in st.session_state.get('last_tab', '🚀 官方模式'):
-                d = fetch_official(f['code'])
-                if d:
-                    profit = (d['val'] - d['last']) * f['shares']
-                    results.append({"基金": f['name'], "涨跌": d['change'], "盈亏": profit, "更新": d['time']})
-            else:
-                s_change = fetch_shadow(f['code'])
-                results.append({"基金": f['name'], "涨跌": s_change, "盈亏": 0.0, "更新": "影子计算"}) # 影子模式仅看涨跌
-
-    if results:
-        df = pd.DataFrame(results)
-        # 1. 总览指标
-        total_p = df['盈亏'].sum()
-        st.metric("今日预计总收益", f"¥{total_p:,.2f}", f"{df['涨跌'].mean():+.2f}%")
-
-        # 2. 实时热力图
-        fig = go.Figure(go.Bar(x=df['基金'], y=df['涨跌'], 
-                               marker_color=['#ef553b' if x >= 0 else '#00cc96' for x in df['涨跌']]))
-        fig.update_layout(height=250, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-
-        # 3. 详细明细 (适配手机滑动)
-        st.dataframe(df, use_container_width=True)
-
-    # 自动刷新开关
-    if st.toggle("开启自动刷新 (15s)", value=True):
-        time.sleep(15)
+with tab_manage:
+    with st.expander("➕ 添加基金持仓"):
+        c_code = st.text_input("基金代码")
+        c_name = st.text_input("简称")
+        c_shares = st.number_input("持有份额", min_value=0.0, step=1.0)
+        if st.button("确认添加"):
+            if c_code and c_name:
+                curr = load_data()
+                curr.append({"code": c_code, "name": c_name, "shares": c_shares})
+                save_data(curr)
+                st.success("已保存！")
+                time.sleep(1)
+                st.rerun()
+    
+    if st.button("🗑️ 清空所有数据"):
+        save_data([])
         st.rerun()
+
+with tab_home:
+    portfolio = load_data()
+    if not portfolio:
+        st.info("请先在‘持仓管理’中添加基金代码。")
+    else:
+        use_shadow = st.toggle("🛡️ 开启影子估值 (防封模式)", value=False)
+        
+        results = []
+        with st.spinner('正在同步数据...'):
+            for f in portfolio:
+                if not use_shadow:
+                    d = fetch_official(f['code'])
+                    if d:
+                        profit = (d['val'] - d['last']) * f['shares']
+                        results.append({"基金": f['name'], "涨跌%": d['change'], "预计盈亏": profit, "时间": d['time']})
+                else:
+                    s_change = fetch_shadow(f['code'])
+                    results.append({"基金": f['name'], "涨跌%": s_change, "预计盈亏": 0.0, "时间": "影子计算"})
+
+        if results:
+            df_res = pd.DataFrame(results)
+            
+            # 总览指标
+            total_p = df_res['预计盈亏'].sum()
+            avg_c = df_res['涨跌%'].mean()
+            col1, col2 = st.columns(2)
+            col1.metric("今日收益", f"¥{total_p:,.2f}", f"{avg_c:+.2f}%")
+            col2.metric("刷新频率", "15秒/次", "Live")
+
+            # 柱状图
+            fig = go.Figure(go.Bar(
+                x=df_res['基金'], y=df_res['涨跌%'],
+                marker_color=['#ef553b' if x >= 0 else '#00cc96' for x in df_res['涨跌%']]
+            ))
+            fig.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+            # 详细列表
+            st.dataframe(df_res, use_container_width=True)
+
+            if not use_shadow and st.toggle("开启实时盯盘", value=True):
+                time.sleep(15)
+                st.rerun()
