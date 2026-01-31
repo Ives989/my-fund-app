@@ -1,3 +1,8 @@
+import os
+os.environ['EF_CACHE_DIR'] = '/tmp/efinance_cache'
+
+import streamlit as st
+# ... 后面保持原来的代码不变 ...
 import streamlit as st
 import pandas as pd
 import efinance as ef
